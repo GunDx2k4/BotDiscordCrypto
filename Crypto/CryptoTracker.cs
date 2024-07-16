@@ -7,8 +7,6 @@ using OKX.API.Extensions;
 using OKX.API.Market.Converters;
 using OKX.API.Market.Enums;
 using OKX.API.Market.Models;
-using System.Diagnostics.Metrics;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace BotDiscordCrypto.Crypto
 {
@@ -29,43 +27,68 @@ namespace BotDiscordCrypto.Crypto
             return this;
         }
 
+        public CryptoTracker SetPublicClientAPI(bool isDemoTrading)
+        {
+            PublicClientAPI = new RestClientAPI(isDemoTrading);
+            return this;
+        }
+
         public async Task UpdatePrice(bool isDemoTrading, ISocketMessageChannel channel, string instrumentId, BarSizeCandlestick barSize)
         {
             if (PublicClientAPI == null)
-                PublicClientAPI = new RestClientAPI(isDemoTrading);
+                SetPublicClientAPI(isDemoTrading);
+
+            StopTask();
 
             CancellationTokenSource sourceToken = new CancellationTokenSource();
             PauseTokenSource pauseToken = new PauseTokenSource();
 
-            long timeResponse = 0;
-
             StartTask(async () =>
             {
+
                 await channel.SendMessageAsync($"Started log {instrumentId} {JsonConvert.SerializeObject(barSize, new BarSizeCandlestickConverter(false))}");
                 await Task.Delay(1000);
 
-                while (true)
+                try
                 {
-                    try
+                    var candlesticks = await PublicClientAPI.Market.GetCandlesticksAsync(instrumentId, barSize, limit: 3);
+                    var data = candlesticks.Data[1];
+                    var dataPrev = candlesticks.Data[2];
+                    long timeResponse = candlesticks.Data[0].Timestamp;
+                    var embedCandlestick = await GetEmbedCandlestick(instrumentId, barSize, data, dataPrev);
+
+                    await channel.SendMessageAsync(embed: embedCandlestick.Build());
+
+                    while (!sourceToken.IsCancellationRequested)
                     {
-                        var candlesticks = await PublicClientAPI.Market.GetCandlesticksAsync(instrumentId, barSize, limit: 3);
-                        var data = candlesticks.Data[1];
-                        var dataPrev = candlesticks.Data[2];
-                        if (timeResponse != data.Timestamp)
+                        try
                         {
-                            timeResponse = data.Timestamp;
+                            candlesticks = await PublicClientAPI.Market.GetCandlesticksAsync(instrumentId, barSize, limit: 3);
+                            data = candlesticks.Data[1];
+                            dataPrev = candlesticks.Data[2];
 
-                            var embedCandlestick = await GetEmbedCandlestick(instrumentId, barSize, data, dataPrev);
+                            if (timeResponse == data.Timestamp)
+                            {
+                                timeResponse = candlesticks.Data[0].Timestamp;
+                                embedCandlestick = await GetEmbedCandlestick(instrumentId, barSize, data, dataPrev);
 
-                            await channel.SendMessageAsync(embed: embedCandlestick.Build());
+                                await channel.SendMessageAsync(embed: embedCandlestick.Build());
+                            }
                             await Task.Delay(1000);
                         }
-                    }
-                    catch (Exception e)
-                    {
-                        throw e;
+                        catch (Exception e)
+                        {
+                            await channel.SendMessageAsync($"ERROR UpdatePrice : {e.Message}");
+                            break;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    await channel.SendMessageAsync($"ERROR UpdatePrice : {ex.Message}");
+                }
+
+                
             }, sourceToken, pauseToken);
         }
 
@@ -128,7 +151,7 @@ namespace BotDiscordCrypto.Crypto
                     {
                         IsInline = true,
                         Name = $"Change ({baseCurrency})",
-                        Value = $"{change} {baseCurrency}"
+                        Value = $"{change.ToOKXFormattedNumber()} {baseCurrency}"
                     },
                     new EmbedFieldBuilder
                     {
@@ -142,7 +165,13 @@ namespace BotDiscordCrypto.Crypto
                         Name = $"Trading volume ({currency})",
                         Value = $"{data.TradingVolume.ToOKXString()} {currency}"
                     },
-                }
+                },
+                Footer = new EmbedFooterBuilder
+                {
+                    Text = $"Bot OKX [2024]",
+                    IconUrl = "https://static.okx.com/cdn/assets/imgs/226/EB771F0EE8994DD5.png",
+                },
+                Timestamp = DateTimeOffset.Now
             };
         }
     }
